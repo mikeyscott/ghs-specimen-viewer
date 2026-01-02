@@ -1,0 +1,189 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>PM Specimen Viewer</title>
+  <style>
+    body{margin:0;background:#0f172a;color:#e5e7eb;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
+    .app{display:grid;grid-template-rows:auto 1fr;gap:12px;height:100vh;padding:12px;box-sizing:border-box}
+    header{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+    .btn,label.file{background:#0b1220;border:1px solid #334155;color:#e5e7eb;font-weight:700;border-radius:10px;padding:6px 10px;appearance:none;cursor:pointer}
+    input[type=file]{display:none}
+    .pane{background:#0b1220;border:1px solid #1f2937;border-radius:12px;display:flex;flex-direction:column;overflow:hidden}
+    h3{margin:8px 10px;color:#94a3b8;font-size:14px}
+    .wrap{flex:1;position:relative}
+    svg{width:100%;height:100%;display:block}
+    .outline{fill:none;stroke:#e5e7eb;stroke-width:2}
+    .meta{font-size:12px;color:#94a3b8;margin:6px 10px 10px}
+    code{background:#0b1220;border:1px solid #334155;border-radius:6px;padding:1px 6px}
+    @media(max-width:900px){.app{height:auto}.wrap{height:70vh}}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <label class="file">Load JSON<input id="file" type="file" accept=".json,application/json"></label>
+        <button class="btn" id="export">Export Outline SVG</button>
+        <button class="btn" id="reset">Reset</button>
+        <span id="fname" style="color:#94a3b8">No file loaded</span>
+      </div>
+      <div style="font-size:12px;color:#cbd5e1">
+        Loads from query param <code>?data=...</code> (same origin) or via file picker • Renders first outline only • Applies y→-y flip
+      </div>
+    </header>
+
+    <div class="pane">
+      <h3>Specimen Outline</h3>
+      <div class="wrap"><svg id="outline"></svg></div>
+      <div class="meta" id="status">Waiting for data…</div>
+      <div class="meta" id="hint"></div>
+    </div>
+  </div>
+
+<script>
+const $=s=>document.querySelector(s);
+const svgOutline=$("#outline");
+let DATA=null;
+
+function clear(svg){while(svg.firstChild) svg.removeChild(svg.firstChild);}
+
+function fit(points,W,H,pad=20){
+  const xs=points.map(p=>p.x), ys=points.map(p=>p.y);
+  const minX=Math.min(...xs),maxX=Math.max(...xs),minY=Math.min(...ys),maxY=Math.max(...ys);
+  const w=maxX-minX,h=maxY-minY;
+  const sx=(W-2*pad)/(w||1), sy=(H-2*pad)/(h||1), s=Math.min(sx,sy);
+  return{ s, tx:(W-s*w)/2 - s*minX, ty:(H-s*h)/2 - s*minY };
+}
+
+function pickFirstOutline(data){
+  // Expected schema: { points: [...], outlines: [ [ {x,y}, ... ], ... ] }
+  if(!data) return null;
+  if(Array.isArray(data.outlines) && data.outlines.length){
+    // some files might accidentally nest extra, normalize if needed
+    const o0 = data.outlines[0];
+    if(Array.isArray(o0) && o0.length && typeof o0[0] === "object" && "x" in o0[0] && "y" in o0[0]) return o0;
+  }
+  return null;
+}
+
+function renderOutline(){
+  clear(svgOutline);
+  const W=svgOutline.clientWidth||700, H=svgOutline.clientHeight||700;
+  svgOutline.setAttribute("viewBox",`0 0 ${W} ${H}`);
+
+  if(!DATA){
+    $("#status").textContent="No data loaded.";
+    return;
+  }
+
+  const outline = pickFirstOutline(DATA);
+  if(!outline){
+    $("#status").textContent="No outlines[0] found in JSON (expected {outlines:[[{x,y},...]]}).";
+    return;
+  }
+
+  // Your existing viewer flip: y -> -y (flip across x-axis)
+  const flipped = outline.map(p => ({ x: +p.x, y: -(+p.y) }));
+  const t=fit(flipped,W,H,24);
+  const pts=flipped.map(p=>({X:t.s*p.x+t.tx,Y:t.s*p.y+t.ty}));
+
+  const path=document.createElementNS("http://www.w3.org/2000/svg","path");
+  let d="M "+pts[0].X+" "+pts[0].Y;
+  for(let i=1;i<pts.length;i++) d+=" L "+pts[i].X+" "+pts[i].Y;
+  d+=" Z";
+  path.setAttribute("d",d);
+  path.setAttribute("class","outline");
+  svgOutline.appendChild(path);
+
+  $("#status").textContent=`Rendered outlines[0] • points: ${outline.length} • y→-y flip applied`;
+}
+
+function reset(){
+  DATA=null;
+  $("#fname").textContent="No file loaded";
+  $("#status").textContent="Waiting for data…";
+  clear(svgOutline);
+  const u = new URL(window.location.href);
+  const dataParam = u.searchParams.get("data");
+  $("#hint").textContent = dataParam
+    ? `Query param data=${dataParam}`
+    : `Tip: open this as pm_viewer_specimen.html?data=yourfile.json (must be fetchable from the same site/folder).`;
+}
+
+async function loadFromUrlParam(){
+  const u = new URL(window.location.href);
+  const dataParam = u.searchParams.get("data");
+  if(!dataParam) return;
+
+  // Resolve relative to this HTML file
+  const resolved = new URL(dataParam, window.location.href).toString();
+  $("#fname").textContent = dataParam;
+
+  try{
+    const resp = await fetch(resolved, { cache: "no-store" });
+    if(!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+    DATA = await resp.json();
+    renderOutline();
+  }catch(err){
+    $("#status").textContent = `Failed to load ${dataParam}: ${err.message}`;
+  }
+}
+
+$("#file").addEventListener("change",e=>{
+  const f=e.target.files[0];
+  if(!f) return;
+  $("#fname").textContent=f.name;
+  const r=new FileReader();
+  r.onload=ev=>{
+    try{
+      DATA=JSON.parse(ev.target.result);
+      renderOutline();
+    }catch(err){
+      alert("Invalid JSON: "+err.message);
+    }
+  };
+  r.readAsText(f);
+});
+
+$("#reset").addEventListener("click",()=>{
+  reset();
+  loadFromUrlParam();
+});
+
+$("#export").addEventListener("click",()=>{
+  if(!DATA) return alert("Load a JSON first.");
+  const outline = pickFirstOutline(DATA);
+  if(!outline) return alert("No outlines[0] found.");
+
+  const flipped = outline.map(p => ({ x: +p.x, y: -(+p.y) }));
+  const W=700,H=700;
+  const t=fit(flipped,W,H,24);
+  const pts=flipped.map(p=>({X:t.s*p.x+t.tx,Y:t.s*p.y+t.ty}));
+
+  let d="M "+pts[0].X+" "+pts[0].Y;
+  for(let i=1;i<pts.length;i++) d+=" L "+pts[i].X+" "+pts[i].Y;
+  d+=" Z";
+
+  const svg=`<?xml version="1.0" encoding="UTF-8"?>`+
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`+
+    `<rect width="100%" height="100%" fill="#0b1220"/>`+
+    `<path d="${d}" fill="none" stroke="#e5e7eb" stroke-width="2"/>`+
+    `</svg>`;
+
+  const blob=new Blob([svg],{type:"image/svg+xml"});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a");
+  a.href=url;
+  a.download="outline_specimen1.svg";
+  a.click();
+  URL.revokeObjectURL(url);
+});
+
+// Boot
+reset();
+loadFromUrlParam();
+</script>
+</body>
+</html>
