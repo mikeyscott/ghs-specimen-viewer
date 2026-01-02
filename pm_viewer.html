@@ -1,0 +1,230 @@
+<!doctype html>
+<html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>PM Interactive Viewer (Color by X, x-axis flip, filled contours)</title>
+<style>
+body{margin:0;background:#0f172a;color:#e5e7eb;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
+.app{display:grid;grid-template-columns:2fr 1fr;gap:12px;height:100vh;padding:12px;box-sizing:border-box}
+header{grid-column:1/-1;display:flex;justify-content:space-between;align-items:center}
+.btn,label.file{background:#0b1220;border:1px solid #334155;color:#e5e7eb;font-weight:700;border-radius:10px;padding:6px 10px;appearance:none;cursor:pointer}
+input[type=file]{display:none}
+.pane{background:#0b1220;border:1px solid #1f2937;border-radius:12px;display:flex;flex-direction:column;overflow:hidden}
+h3{margin:8px 10px;color:#94a3b8;font-size:14px}
+.wrap{flex:1;position:relative}
+svg{width:100%;height:100%;display:block}
+.pt{cursor:pointer}
+.pt.selected{stroke:#fff;stroke-width:1.6}
+.contour-band{
+  stroke:#020617;
+  stroke-width:0.4;
+  fill-opacity:0.3;   /* 50% fill */
+  opacity:0.9;        /* a bit softer stroke overall */
+}
+.outline{fill:none;stroke:#e5e7eb;stroke-width:2}
+.meta{font-size:12px;color:#94a3b8;margin:6px 10px 10px}
+#tt{position:absolute;display:none;background:#0b1220;border:1px solid #334155;border-radius:8px;padding:6px 8px;font-size:12px;color:#e5e7eb;pointer-events:none;box-shadow:0 6px 20px rgba(0,0,0,0.35)}
+@media(max-width:1000px){.app{grid-template-columns:1fr;height:auto}.wrap{height:60vh}}
+</style></head>
+<body><div class="app">
+<header>
+  <div>
+    <label class="file">Load JSON<input id="file" type="file" accept=".json,application/json"></label>
+    <button class="btn" id="reset">Reset</button>
+    <button class="btn" id="export">Export Outline SVG</button>
+    <span id="fname" style="margin-left:8px;color:#94a3b8">No file loaded</span>
+  </div>
+  <div style="font-size:12px;color:#cbd5e1">Hover shows id/spec_idx/x/z • Points colored by x • Contours filled</div>
+</header>
+<div class="pane"><h3>Morphospace (contours + filled bands + points)</h3><div class="wrap"><svg id="morpho"></svg><div id="tt"></div></div><div class="meta" id="legend">Ready.</div></div>
+<div class="pane"><h3>Outline (flipped along x-axis)</h3><div class="wrap"><svg id="outline"></svg></div><div class="meta" id="status">No specimen selected.</div></div>
+</div>
+<script>
+const $=s=>document.querySelector(s); const svgMorpho=$("#morpho"), svgOutline=$("#outline");
+let DATA=null, SEL=null;
+function clear(svg){while(svg.firstChild) svg.removeChild(svg.firstChild);}
+function lin(domain,range){const[d0,d1]=domain,[r0,r1]=range,m=(r1-r0)/(d1-d0);const f=x=>r0+(x-d0)*m;f.inv=y=>d0+(y-r0)/m;return f;}
+
+function kde2d(pts,xdom,ydom,nx=120,ny=120){
+  const xs=new Float64Array(nx),ys=new Float64Array(ny);
+  for(let i=0;i<nx;i++) xs[i]=xdom[0]+i*(xdom[1]-xdom[0])/(nx-1);
+  for(let j=0;j<ny;j++) ys[j]=ydom[0]+j*(ydom[1]-ydom[0])/(ny-1);
+  const n=pts.length, mean=a=>a.reduce((p,c)=>p+c,0)/a.length,
+    std=a=>Math.sqrt(a.reduce((p,c)=>p+(c-mean(a))**2,0)/a.length);
+  const xsA=pts.map(p=>p.x), ysA=pts.map(p=>p.y), sx=std(xsA), sy=std(ysA),
+    bwx=1.06*sx*Math.pow(n,-0.2)||1, bwy=1.06*sy*Math.pow(n,-0.2)||1,
+    ix=1/(2*bwx*bwx), iy=1/(2*bwy*bwy), norm=1/(2*Math.PI*bwx*bwy*n);
+  const val=new Float64Array(nx*ny);
+  for(let j=0;j<ny;j++) for(let i=0;i<nx;i++){
+    const x=xs[i],y=ys[j]; let s=0;
+    for(let k=0;k<n;k++){const dx=x-pts[k].x,dy=y-pts[k].y; s+=Math.exp(-(dx*dx)*ix-(dy*dy)*iy);}
+    val[j*nx+i]=s*norm;
+  }
+  return{xs,ys,nx,ny,values:val};
+}
+
+function iso(grid,levels){
+  const{xs,ys,nx,ny,values}=grid, V=(i,j)=>values[j*nx+i], P=(a,b,va,vb,t)=>a+(t-va)*(b-a)/(vb-va);
+  const out=[];
+  for(const t of levels){
+    const segs=[];
+    for(let j=0;j<ny-1;j++)for(let i=0;i<nx-1;i++){
+      const v00=V(i,j),v10=V(i+1,j),v01=V(i,j+1),v11=V(i+1,j+1);
+      const E=[];
+      if((v00<t)!=(v01<t)) E.push([xs[i], P(ys[j],ys[j+1],v00,v01,t)]);
+      if((v10<t)!=(v11<t)) E.push([xs[i+1], P(ys[j],ys[j+1],v10,v11,t)]);
+      if((v00<t)!=(v10<t)) E.push([P(xs[i],xs[i+1],v00,v10,t), ys[j]]);
+      if((v01<t)!=(v11<t)) E.push([P(xs[i],xs[i+1],v01,v11,t), ys[j+1]]);
+      if(E.length==2) segs.push(E);
+    }
+    const paths=[];
+    while(segs.length){
+      const path=[segs.pop()];
+      let changed=true;
+      while(changed){
+        changed=false;
+        for(let s=segs.length-1;s>=0;s--){
+          const a=path[0][0],b=path[path.length-1][1],u=segs[s][0],v=segs[s][1],
+          eq=(p,q)=>Math.abs(p[0]-q[0])<1e-6&&Math.abs(p[1]-q[1])<1e-6;
+          if(eq(v,a)){path.unshift([u,v]);segs.splice(s,1);changed=true;}
+          else if(eq(u,a)){path.unshift([v,u]);segs.splice(s,1);changed=true;}
+          else if(eq(u,b)){path.push([u,v]);segs.splice(s,1);changed=true;}
+          else if(eq(v,b)){path.push([v,u]);segs.splice(s,1);changed=true;}
+        }
+      }
+      paths.push(path.flat());
+    }
+    out.push({t,paths});
+  }
+  return out;
+}
+
+// color for points based on x
+function colorScaleX(x,xmin,xmax){
+  if(xmin===undefined||xmax===undefined||!isFinite(x)) return '#ef4444';
+  const t=(x - xmin) / (xmax - xmin || 1);
+  const hue=220 + (10 - 220) * Math.min(Math.max(t,0),1); // blue -> red
+  return `hsl(${hue},80%,55%)`;
+}
+
+// color for contour band based on KDE level t
+function contourFillColor(t,tmin,tmax){
+  const u=(t - tmin) / (tmax - tmin || 1);
+  const hue=220 + (40 - 220) * Math.min(Math.max(u,0),1);  // blue-ish outer to warm inner
+  const light = 18 + 30*u;                                 // slightly brighter towards centre
+  return `hsl(${hue},80%,${light}%)`;
+}
+
+function renderMorpho(){
+  const ttEl = document.getElementById('tt');
+  clear(svgMorpho); if(!DATA) return;
+  const W=svgMorpho.clientWidth||600, H=svgMorpho.clientHeight||500; svgMorpho.setAttribute("viewBox",`0 0 ${W} ${H}`);
+  const pts=DATA.points.map((p,i)=>({...p,i}));
+  const hasZ = pts.length && ('z' in pts[0]);
+
+  const xs = pts.map(p=>p.x);
+  const ys = pts.map(p=>p.y);
+  const xmin = Math.min(...xs), xmax = Math.max(...xs);
+  const ymin = Math.min(...ys), ymax = Math.max(...ys);
+
+  const xdom=[xmin,xmax], ydom=[ymin,ymax];
+  const pad=0.05, xr=xdom[1]-xdom[0], yr=ydom[1]-ydom[0];
+  xdom[0]-=xr*pad; xdom[1]+=xr*pad; ydom[0]-=yr*pad; ydom[1]+=yr*pad;
+
+  const x=lin(xdom,[48,W-16]), y=lin(ydom,[H-32,16]);
+
+  // KDE + filled contours
+  const grid=kde2d(pts,[xmin,xmax],[ymin,ymax],120,120), vmax=Math.max(...grid.values);
+  const levels=[.05,.1,.2,.3,.4,.5].map(p=>p*vmax);
+  const cs=iso(grid,levels);
+  const tmin = levels[0], tmax = levels[levels.length-1];
+
+  // draw filled bands (low → high so inner ones sit on top)
+  for(const c of cs){
+    const fill = contourFillColor(c.t,tmin,tmax);
+    for(const path of c.paths){
+      const d=path.map((p,j)=> (j? "L":"M")+x(p[0])+" "+y(p[1]) ).join(" ")+" Z";
+      const e=document.createElementNS("http://www.w3.org/2000/svg","path");
+      e.setAttribute("d",d);
+      e.setAttribute("class","contour-band");
+      e.setAttribute("fill",fill);
+      svgMorpho.appendChild(e);
+    }
+  }
+
+  // axes on top of fill
+  const ax=document.createElementNS("http://www.w3.org/2000/svg","g");
+  ax.innerHTML=`<line x1="${x(xdom[0])}" y1="${y(0)}" x2="${x(xdom[1])}" y2="${y(0)}" stroke="#374151"/>
+                <line x1="${x(0)}" y1="${y(ydom[0])}" x2="${x(0)}" y2="${y(ydom[1])}" stroke="#374151"/>`;
+  svgMorpho.appendChild(ax);
+
+  // points (colored by X) on top of everything
+  for(const p of pts){
+    const c=document.createElementNS("http://www.w3.org/2000/svg","circle");
+    c.setAttribute("cx",x(p.x)); c.setAttribute("cy",y(p.y)); c.setAttribute("r",4); c.setAttribute("class","pt");
+    c.setAttribute("fill",colorScaleX(p.x, xmin, xmax));    // light gray fill
+    c.setAttribute("stroke", "#020617");  // thin dark edge so they pop
+    c.setAttribute("stroke-width", "0.6");
+
+    c.addEventListener("mouseenter",(e)=>{
+      if(!ttEl) return;
+      ttEl.style.display="block";
+      ttEl.textContent = `id ${p.id ?? p.i} | spec_idx ${p.spec_idx ?? (p.i+1)} | x ${p.x}` + (hasZ ? ` | z ${p.z}` : "");
+    });
+    c.addEventListener("mousemove",(e)=>{
+      if(!ttEl) return;
+      const rect = e.target.ownerSVGElement.getBoundingClientRect();
+      ttEl.style.left = (e.clientX - rect.left + 10) + "px";
+      ttEl.style.top  = (e.clientY - rect.top  - 10) + "px";
+    });
+    c.addEventListener("mouseleave",()=>{ if(ttEl) ttEl.style.display="none"; });
+
+    c.addEventListener("click",()=>{
+      Array.from(svgMorpho.querySelectorAll(".pt")).forEach(n=>n.classList.remove("selected"));
+      c.classList.add("selected"); SEL=p; renderOutline();
+      $("#legend").textContent=`Selected id ${p.id??p.i} → idx ${p.spec_idx??(p.i+1)}`;
+    });
+    svgMorpho.appendChild(c);
+  }
+}
+
+function fit(points,W,H,pad=20){
+  const xs=points.map(p=>p.x), ys=points.map(p=>p.y), minX=Math.min(...xs),maxX=Math.max(...xs),minY=Math.min(...ys),maxY=Math.max(...ys);
+  const w=maxX-minX,h=maxY-minY; const sx=(W-2*pad)/(w||1), sy=(H-2*pad)/(h||1), s=Math.min(sx,sy);
+  return{ s, tx:(W-s*w)/2 - s*minX, ty:(H-s*h)/2 - s*minY };
+}
+
+function renderOutline(){
+  clear(svgOutline); const W=svgOutline.clientWidth||500,H=svgOutline.clientHeight||500; svgOutline.setAttribute("viewBox",`0 0 ${W} ${H}`);
+  if(!DATA||!SEL){ $("#status").textContent="No specimen selected."; return; }
+  const idx=(SEL.spec_idx??(SEL.i+1)); const outline=DATA.outlines[idx-1]||DATA.outlines[idx];
+  if(!outline){ $("#status").textContent=`No outline for ${idx}`; return; }
+
+  // FLIP ALONG X-AXIS: x unchanged, y -> -y
+  const flipped = outline.map(p => ({ x: p.x, y: -p.y }));
+  const t=fit(flipped,W,H,24), pts=flipped.map(p=>({X:t.s*p.x+t.tx,Y:t.s*p.y+t.ty}));
+
+  const path=document.createElementNS("http://www.w3.org/2000/svg","path");
+  let d="M "+pts[0].X+" "+pts[0].Y; for(let i=1;i<pts.length;i++) d+=" L "+pts[i].X+" "+pts[i].Y; d+=" Z";
+  path.setAttribute("d",d); path.setAttribute("class","outline"); svgOutline.appendChild(path);
+  $("#status").textContent=`Outline index ${idx}, points: ${outline.length} (flipped along x-axis)`;
+}
+
+function reset(){ SEL=null; $("#legend").textContent="Ready."; $("#status").textContent="No specimen selected."; renderMorpho(); clear(svgOutline); }
+
+$("#file").addEventListener("change",e=>{const f=e.target.files[0]; if(!f) return; $("#fname").textContent=f.name; const r=new FileReader(); r.onload=ev=>{try{DATA=JSON.parse(ev.target.result); reset();}catch(err){alert("Invalid JSON: "+err.message);}}; r.readAsText(f);});
+$("#reset").addEventListener("click",reset);
+
+$("#export").addEventListener("click",()=>{
+  if(!DATA||!SEL) return alert("Select a point first.");
+  const idx=(SEL.spec_idx??(SEL.i+1)); const outline=DATA.outlines[idx-1]||DATA.outlines[idx]; if(!outline) return alert("No outline found.");
+
+  // Export with same x-axis flip
+  const flipped = outline.map(p => ({ x: p.x, y: -p.y }));
+  const W=600,H=600,t=fit(flipped,W,H,24), pts=flipped.map(p=>({X:t.s*p.x+t.tx,Y:t.s*p.y+t.ty}));
+  let d="M "+pts[0].X+" "+pts[0].Y; for(let i=1;i<pts.length;i++) d+=" L "+pts[i].X+" "+pts[i].Y; d+=" Z";
+  const svg=`<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}"><rect width="100%" height="100%" fill="#0b1220"/><path d="${d}" fill="none" stroke="#e5e7eb" stroke-width="2"/></svg>`;
+  const blob=new Blob([svg],{type:"image/svg+xml"}), url=URL.createObjectURL(blob), a=document.createElement("a");
+  a.href=url; a.download=`outline_${idx}_xflip.svg`; a.click(); URL.revokeObjectURL(url);
+});
+
+renderMorpho(); renderOutline();
+</script></body></html>
