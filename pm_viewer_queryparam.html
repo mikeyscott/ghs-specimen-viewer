@@ -1,10 +1,10 @@
 <!doctype html>
 <html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>PM Interactive Viewer (Color by X, x-axis flip, filled contours)</title>
+<title>PM Interactive Viewer</title>
 <style>
 body{margin:0;background:#0f172a;color:#e5e7eb;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
-.app{display:grid;grid-template-columns:2fr 1fr;gap:12px;height:100vh;padding:12px;box-sizing:border-box}
-header{grid-column:1/-1;display:flex;justify-content:space-between;align-items:center}
+.app{display:grid;grid-template-columns:2fr 1fr;gap:12px;height:100vh;padding:12px;box-sizing:border-box;grid-template-rows:auto 1fr}
+header{grid-column:1/-1;display:flex;justify-content:space-between;align-items:center;padding:6px 0;min-height:0}
 .btn,label.file{background:#0b1220;border:1px solid #334155;color:#e5e7eb;font-weight:700;border-radius:10px;padding:6px 10px;appearance:none;cursor:pointer}
 input[type=file]{display:none}
 .pane{background:#0b1220;border:1px solid #1f2937;border-radius:12px;display:flex;flex-direction:column;overflow:hidden}
@@ -25,17 +25,9 @@ svg{width:100%;height:100%;display:block}
 @media(max-width:1000px){.app{grid-template-columns:1fr;height:auto}.wrap{height:60vh}}
 </style></head>
 <body><div class="app">
-<header>
-  <div>
-    <label class="file">Load JSON<input id="file" type="file" accept=".json,application/json"></label>
-    <button class="btn" id="reset">Reset</button>
-    <button class="btn" id="export">Export Outline SVG</button>
-    <span id="fname" style="margin-left:8px;color:#94a3b8">No file loaded</span>
-  </div>
-  <div style="font-size:12px;color:#cbd5e1">Hover shows id/spec_idx/x/z • Points colored by x • Contours filled</div>
-</header>
-<div class="pane"><h3>Morphospace (contours + filled bands + points)</h3><div class="wrap"><svg id="morpho"></svg><div id="tt"></div></div><div class="meta" id="legend">Ready.</div></div>
-<div class="pane"><h3>Outline (flipped along x-axis)</h3><div class="wrap"><svg id="outline"></svg></div><div class="meta" id="status">No specimen selected.</div></div>
+<header><h2 style="margin:0;color:#e5e7eb;font-size:16px">Source: <span id="fname" style="color:#94a3b8">No file</span></h2><div style="display:none"><label class="file" for="file">📂 Load JSON</label><input type="file" id="file" accept=".json"/><button class="btn" id="reset">↻ Reset</button><button class="btn" id="export">💾 Export SVG</button></div></header>
+<div class="pane"><h3>Morphospace specimen density</h3><div class="wrap"><svg id="morpho"></svg><div id="tt"></div></div><div class="meta" id="legend">Ready.</div></div>
+<div class="pane"><h3 id="outline-header">Specimen outline</h3><div class="wrap"><svg id="outline"></svg></div><div class="meta" id="status">No specimen selected.</div></div>
 </div>
 <script>
 const $=s=>document.querySelector(s); const svgMorpho=$("#morpho"), svgOutline=$("#outline");
@@ -194,21 +186,24 @@ function fit(points,W,H,pad=20){
 
 function renderOutline(){
   clear(svgOutline); const W=svgOutline.clientWidth||500,H=svgOutline.clientHeight||500; svgOutline.setAttribute("viewBox",`0 0 ${W} ${H}`);
-  if(!DATA||!SEL){ $("#status").textContent="No specimen selected."; return; }
+  if(!DATA||!SEL){ $("#status").textContent="No specimen selected."; $("#outline-header").innerHTML="Specimen outline"; return; }
   const idx=(SEL.spec_idx??(SEL.i+1)); const outline=DATA.outlines[idx-1]||DATA.outlines[idx];
   if(!outline){ $("#status").textContent=`No outline for ${idx}`; return; }
 
-  // FLIP ALONG X-AXIS: x unchanged, y -> -y
+  // Update header with specimen index
+  $("#outline-header").innerHTML=`Specimen outline <span style="font-size:11px;color:#94a3b8;font-weight:normal">#${idx}</span>`;
+
+  // Flip y coordinates
   const flipped = outline.map(p => ({ x: p.x, y: -p.y }));
   const t=fit(flipped,W,H,24), pts=flipped.map(p=>({X:t.s*p.x+t.tx,Y:t.s*p.y+t.ty}));
 
   const path=document.createElementNS("http://www.w3.org/2000/svg","path");
   let d="M "+pts[0].X+" "+pts[0].Y; for(let i=1;i<pts.length;i++) d+=" L "+pts[i].X+" "+pts[i].Y; d+=" Z";
   path.setAttribute("d",d); path.setAttribute("class","outline"); svgOutline.appendChild(path);
-  $("#status").textContent=`Outline index ${idx}, points: ${outline.length} (flipped along x-axis)`;
+  $("#status").textContent=`Outline index ${idx}, points: ${outline.length}`;
 }
 
-function reset(){ SEL=null; $("#legend").textContent="Ready."; $("#status").textContent="No specimen selected."; renderMorpho(); clear(svgOutline); }
+function reset(){ SEL=null; $("#legend").textContent="Ready."; $("#status").textContent="No specimen selected."; $("#outline-header").innerHTML="Specimen outline"; renderMorpho(); clear(svgOutline); }
 
 
 function normalizeData(raw){
@@ -297,6 +292,12 @@ async function loadFromUrlParam(){
       if (typeof renderMorpho === "function") renderMorpho();
       if (typeof renderOutline === "function") renderOutline();
     }
+    // Auto-select first specimen
+    if(DATA && DATA.points && DATA.points.length > 0) {
+      SEL = DATA.points[0];
+      renderOutline();
+      $("#legend").textContent = `Selected id ${SEL.id??SEL.i} → idx ${SEL.spec_idx??(SEL.i+1)}`;
+    }
     return true;
   }catch(err){
     const legend = document.querySelector("#legend");
@@ -315,7 +316,7 @@ $("#export").addEventListener("click",()=>{
   if(!DATA||!SEL) return alert("Select a point first.");
   const idx=(SEL.spec_idx??(SEL.i+1)); const outline=DATA.outlines[idx-1]||DATA.outlines[idx]; if(!outline) return alert("No outline found.");
 
-  // Export with same x-axis flip
+  // Export with flipped y coordinates
   const flipped = outline.map(p => ({ x: p.x, y: -p.y }));
   const W=600,H=600,t=fit(flipped,W,H,24), pts=flipped.map(p=>({X:t.s*p.x+t.tx,Y:t.s*p.y+t.ty}));
   let d="M "+pts[0].X+" "+pts[0].Y; for(let i=1;i<pts.length;i++) d+=" L "+pts[i].X+" "+pts[i].Y; d+=" Z";
