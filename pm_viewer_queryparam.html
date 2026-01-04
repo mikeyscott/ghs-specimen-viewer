@@ -25,15 +25,7 @@ svg{width:100%;height:100%;display:block}
 @media(max-width:1000px){.app{grid-template-columns:1fr;height:auto}.wrap{height:60vh}}
 </style></head>
 <body><div class="app">
-<header>
-  <div>
-    <label class="file">Load JSON<input id="file" type="file" accept=".json,application/json"></label>
-    <button class="btn" id="reset">Reset</button>
-    <button class="btn" id="export">Export Outline SVG</button>
-    <span id="fname" style="margin-left:8px;color:#94a3b8">No file loaded</span>
-  </div>
-  <div style="font-size:12px;color:#cbd5e1">Hover shows id/spec_idx/x/z • Points colored by x • Contours filled</div>
-</header>
+
 <div class="pane"><h3>Morphospace (contours + filled bands + points)</h3><div class="wrap"><svg id="morpho"></svg><div id="tt"></div></div><div class="meta" id="legend">Ready.</div></div>
 <div class="pane"><h3>Outline (flipped along x-axis)</h3><div class="wrap"><svg id="outline"></svg></div><div class="meta" id="status">No specimen selected.</div></div>
 </div>
@@ -208,7 +200,17 @@ function renderOutline(){
   $("#status").textContent=`Outline index ${idx}, points: ${outline.length} (flipped along x-axis)`;
 }
 
-function reset(){ SEL=null; $("#legend").textContent="Ready."; $("#status").textContent="No specimen selected."; renderMorpho(); clear(svgOutline); }
+function reset(){ SEL=null; $("#legend").textContent="Ready."; $("#status").textContent="No specimen selected."; renderMorpho(); clear(svgOutline); 
+  // Auto-select first specimen if available
+  if (DATA && Array.isArray(DATA.points) && DATA.points.length > 0) {
+    if (typeof selectSpecimen === "function") {
+      selectSpecimen(1);
+    } else if (typeof selected !== "undefined") {
+      selected = 1;
+      if (typeof renderOutline === "function") renderOutline();
+    }
+  }
+}
 
 async function loadFromUrlParam(){
   const u = new URL(window.location.href);
