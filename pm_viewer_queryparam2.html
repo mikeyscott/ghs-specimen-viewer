@@ -12,15 +12,8 @@ h3{margin:10px 12px;color:#94a3b8;font-size:22px}
 svg{width:100%;height:100%;display:block}
 .pt{cursor:pointer}
 .pt.selected{stroke:#fff;stroke-width:1.6}
-.contour-line{
-  fill:none;
-  stroke:#000;
-  stroke-width:1.2;
-  opacity:0.95;
-}
-.raster-cell{
-  stroke:none;
-}
+.contour-line{fill:none;stroke:#000;stroke-width:1.2;opacity:0.95}
+.raster-cell{stroke:none}
 .outline{fill:none;stroke:#e5e7eb;stroke-width:2}
 .meta{font-size:12px;color:#94a3b8;margin:6px 10px 10px}
 #tt{position:absolute;display:none;background:#0b1220;border:1px solid #334155;border-radius:8px;padding:6px 8px;font-size:12px;color:#e5e7eb;pointer-events:none;box-shadow:0 6px 20px rgba(0,0,0,0.35)}
@@ -43,70 +36,64 @@ function colorScaleX(x,xmin,xmax){
   return `hsl(${hue},80%,55%)`;
 }
 
-// ---- 2D gridded density from supplied B xy data ----
-// This replaces the previous direct-kde / covariance ellipse approaches.
-// We use the supplied morphospace points, bin them onto a regular grid,
-// lightly smooth that scalar field, then draw raster + contours from it.
+function mean(arr){ return arr.reduce((a,b)=>a+b,0)/(arr.length||1); }
+function sd(arr){
+  const m = mean(arr);
+  const v = arr.reduce((a,b)=>a + (b-m)*(b-m), 0) / Math.max(arr.length - 1, 1);
+  return Math.sqrt(v);
+}
 
-function buildDensityGrid(pts, xdom, ydom, nx=24, ny=18){
-  const values = new Float64Array(nx*ny);
-  const dx = (xdom[1]-xdom[0])/(nx-1 || 1);
-  const dy = (ydom[1]-ydom[0])/(ny-1 || 1);
+// R MASS::bandwidth.nrd-style scale (Silverman/NRD spirit)
+function bandwidthNRD(arr){
+  const n = arr.length || 1;
+  const s = sd(arr) || 1e-6;
+  return 1.06 * s * Math.pow(n, -0.2);
+}
 
-  // bilinear splat into nearest 4 cells for a smoother/raw-count hybrid look
-  for(const p of pts){
-    const gx = (p.x - xdom[0]) / (dx || 1);
-    const gy = (p.y - ydom[0]) / (dy || 1);
-    const i0 = Math.floor(gx), j0 = Math.floor(gy);
-    const tx = gx - i0, ty = gy - j0;
+// MASS-like 2D KDE evaluated on a regular grid.
+// This replaces the previous hand-built multi-scale count grid.
+function kde2dMassStyle(pts, xdom, ydom, n=50, bwScale=1.0){
+  const xs = new Float64Array(n);
+  const ys = new Float64Array(n);
+  for(let i=0;i<n;i++){
+    xs[i] = xdom[0] + i * (xdom[1]-xdom[0]) / (n-1 || 1);
+    ys[i] = ydom[0] + i * (ydom[1]-ydom[0]) / (n-1 || 1);
+  }
 
-    for(let dj=0; dj<=1; dj++){
-      for(let di=0; di<=1; di++){
-        const i = i0 + di, j = j0 + dj;
-        if(i < 0 || i >= nx || j < 0 || j >= ny) continue;
-        const wx = di ? tx : (1-tx);
-        const wy = dj ? ty : (1-ty);
-        values[j*nx+i] += wx*wy;
+  const xvals = pts.map(p=>p.x);
+  const yvals = pts.map(p=>p.y);
+  const N = pts.length || 1;
+
+  let hx = bandwidthNRD(xvals) * bwScale;
+  let hy = bandwidthNRD(yvals) * bwScale;
+  hx = Math.max(hx, 1e-6);
+  hy = Math.max(hy, 1e-6);
+
+  const values = new Float64Array(n*n);
+  const invHx = 1 / hx, invHy = 1 / hy;
+  const norm = 1 / (2 * Math.PI * hx * hy * N);
+
+  for(let j=0;j<n;j++){
+    const gy = ys[j];
+    for(let i=0;i<n;i++){
+      const gx = xs[i];
+      let s = 0;
+      for(let k=0;k<N;k++){
+        const dx = (gx - pts[k].x) * invHx;
+        const dy = (gy - pts[k].y) * invHy;
+        s += Math.exp(-0.5 * (dx*dx + dy*dy));
       }
+      values[j*n + i] = norm * s;
     }
   }
 
   return {
-    nx, ny, values,
-    xdom:[...xdom],
-    ydom:[...ydom],
-    dx, dy
+    nx:n, ny:n, xs, ys, values,
+    xdom:[...xdom], ydom:[...ydom],
+    dx:(xdom[1]-xdom[0])/(n-1 || 1),
+    dy:(ydom[1]-ydom[0])/(n-1 || 1),
+    hx, hy
   };
-}
-
-function smoothGrid(grid, passes=4){
-  const {nx, ny} = grid;
-  let src = new Float64Array(grid.values);
-  let tmp = new Float64Array(src.length);
-
-  // simple separable [1 2 1] blur
-  for(let pass=0; pass<passes; pass++){
-    // horizontal
-    for(let j=0; j<ny; j++){
-      for(let i=0; i<nx; i++){
-        const c = src[j*nx+i];
-        const l = src[j*nx + Math.max(0, i-1)];
-        const r = src[j*nx + Math.min(nx-1, i+1)];
-        tmp[j*nx+i] = (l + 2*c + r) / 4;
-      }
-    }
-    // vertical back into src
-    for(let j=0; j<ny; j++){
-      for(let i=0; i<nx; i++){
-        const c = tmp[j*nx+i];
-        const u = tmp[Math.max(0, j-1)*nx + i];
-        const d = tmp[Math.min(ny-1, j+1)*nx + i];
-        src[j*nx+i] = (u + 2*c + d) / 4;
-      }
-    }
-  }
-
-  return {...grid, values: src};
 }
 
 function iso(grid, levels){
@@ -135,7 +122,6 @@ function iso(grid, levels){
 
         if(pts.length===2) segs.push([pts[0], pts[1]]);
         else if(pts.length===4){
-          // ambiguous case: split into two segments
           segs.push([pts[0], pts[1]]);
           segs.push([pts[2], pts[3]]);
         }
@@ -148,7 +134,6 @@ function iso(grid, levels){
       const first = segs.pop();
       const path = [first[0], first[1]];
       let changed = true;
-
       while(changed){
         changed = false;
         for(let s=segs.length-1; s>=0; s--){
@@ -160,25 +145,16 @@ function iso(grid, levels){
           else if(eq(v, tail)){ path.push(u); segs.splice(s,1); changed=true; }
         }
       }
-
       if(path.length >= 4) paths.push(path);
     }
-
     out.push({t, paths});
   }
   return out;
 }
 
-
-function combineGrids(a, b, wa=1, wb=1){
-  const out = new Float64Array(a.values.length);
-  for(let i=0;i<out.length;i++) out[i] = wa*a.values[i] + wb*b.values[i];
-  return {...a, values: out};
-}
-
 function grayForValue(v, vmax){
   const u = Math.min(Math.max(v / (vmax || 1), 0), 1);
-  const light = 24 + 62*u; // dark charcoal -> light gray
+  const light = 24 + 62*u;
   return `hsl(0,0%,${light}%)`;
 }
 
@@ -194,37 +170,33 @@ function renderMorpho(){
   const xmin = Math.min(...xs), xmax = Math.max(...xs);
   const ymin = Math.min(...ys), ymax = Math.max(...ys);
 
-  const xdom=[xmin,xmax], ydom=[ymin,ymax];
-  const pad=0.10, xr=(xdom[1]-xdom[0]||1), yr=(ydom[1]-ydom[0]||1);
-  xdom[0]-=xr*pad; xdom[1]+=xr*pad; ydom[0]-=yr*pad; ydom[1]+=yr*pad;
+  // Match your father's MASS::kde2d setup more closely.
+  // If the points already look like GPA stdscores, fix lims to [-3,3,-3,3].
+  // Otherwise fall back to padded data extents.
+  const looksStandardized = xmin >= -3.25 && xmax <= 3.25 && ymin >= -3.25 && ymax <= 3.25;
+  const lims = looksStandardized ? [-3, 3, -3, 3] : (()=>{
+    const pad=0.10, xr=(xmax-xmin||1), yr=(ymax-ymin||1);
+    return [xmin-xr*pad, xmax+xr*pad, ymin-yr*pad, ymax+yr*pad];
+  })();
+  const xdom=[lims[0], lims[1]], ydom=[lims[2], lims[3]];
 
   const x=lin(xdom,[48,W-16]), y=lin(ydom,[H-32,16]);
 
-  // density grid from supplied B data
-  // use a multi-scale field so outliers still sit within one broad base contour,
-  // while tighter inner contours preserve local clusters
-  const rawGrid = buildDensityGrid(pts, xdom, ydom, 48, 36);
-  const localGrid = smoothGrid(rawGrid, 5);
-  const broadGrid = smoothGrid(rawGrid, 30);
-  const mergedGrid = combineGrids(localGrid, broadGrid, 1.0, 1.25);
-
-  // Add a low broad-field floor so isolated points sit inside the main enclosing contour
-  // rather than becoming detached contour islands.
-  const floorFrac = 0.50;
-  const broadMax = Math.max(...broadGrid.values) || 1;
-  const floored = new Float64Array(mergedGrid.values.length);
-  for(let i=0;i<floored.length;i++){
-    floored[i] = mergedGrid.values[i] + floorFrac * broadGrid.values[i];
-  }
-  const grid = {...mergedGrid, values: floored};
-  const vmax = Math.max(...grid.values);
+  // MASS-like KDE on supplied B / GPA coordinates.
+  // bwScale is your main tuning knob:
+  // 1.0 = closer to default MASS feel
+  // >1.0 = smoother, fewer outlier islands
+  const kdeN = 50;
+  const bwScale = 1.0;
+  const grid = kde2dMassStyle(pts, xdom, ydom, kdeN, bwScale);
+  const vmax = Math.max(...grid.values) || 1;
 
   // grayscale raster underneath
   const rasterG = document.createElementNS("http://www.w3.org/2000/svg","g");
   for(let j=0; j<grid.ny-1; j++){
     for(let i=0; i<grid.nx-1; i++){
       const v = grid.values[j*grid.nx+i];
-      if(v <= 0.0001) continue;
+      if(v <= vmax*0.001) continue;
       const rect = document.createElementNS("http://www.w3.org/2000/svg","rect");
       const x0 = x(grid.xdom[0] + i*grid.dx);
       const x1 = x(grid.xdom[0] + (i+1)*grid.dx);
@@ -242,8 +214,10 @@ function renderMorpho(){
   }
   svgMorpho.appendChild(rasterG);
 
-  // contour lines
-  const levels = [0.03, 0.06, 0.10, 0.16, 0.24, 0.36, 0.52, 0.70].map(p=>p*vmax).filter(v=>v>0);
+  // contour lines from KDE surface
+const levels = [0.08, 0.12, 0.17, 0.24, 0.34, 0.48, 0.66]
+    .map(p=>p*vmax)
+    .filter(v=>v>0);
   const contours = iso(grid, levels);
   const contourG = document.createElementNS("http://www.w3.org/2000/svg","g");
   for(const c of contours){
@@ -295,7 +269,7 @@ function renderMorpho(){
       c.classList.add("selected");
       SEL=p;
       renderOutline();
-      $("#legend").textContent=`Selected id ${p.id??p.i} → idx ${p.spec_idx??(p.i+1)} | multi-scale gridded contour plot from supplied GPA xy`;
+      $("#legend").textContent=`Selected id ${p.id??p.i} → idx ${p.spec_idx??(p.i+1)} | MASS-style KDE contour plot from supplied GPA xy`;
     });
     svgMorpho.appendChild(c);
 
@@ -310,7 +284,7 @@ function renderMorpho(){
   }
 
   if(!SEL){
-    $("#legend").textContent=`Multi-scale gridded density + contours from supplied GPA xy data; outlines still use raw A xy data.`;
+    $("#legend").textContent=`MASS-style KDE (n=${kdeN}, bwScale=${bwScale.toFixed(2)}) on supplied GPA xy data; outlines still use raw A xy data.`;
   }
 }
 
@@ -406,7 +380,7 @@ async function loadFromUrlParam(){
     if(DATA && DATA.points && DATA.points.length > 0) {
       SEL = DATA.points[0];
       renderOutline();
-      $("#legend").textContent = `Selected id ${SEL.id??SEL.i} → idx ${SEL.spec_idx??(SEL.i+1)} | multi-scale gridded contour plot from supplied GPA xy`;
+      $("#legend").textContent = `Selected id ${SEL.id??SEL.i} → idx ${SEL.spec_idx??(SEL.i+1)} | MASS-style KDE contour plot from supplied GPA xy`;
     }
     return true;
   }catch(err){
