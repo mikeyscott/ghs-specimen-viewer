@@ -1,0 +1,30 @@
+cff-version: 1.2.0
+message: "If you use this repository, please cite it using the metadata below."
+title: "ghs-specimen-viewer"
+type: software
+authors:
+  - family-names: "Scott"
+    given-names: "Michael W."
+  - family-names: "Scott"
+    given-names: "George H."
+repository-code: "https://github.com/mikeyscott/ghs-specimen-viewer"
+url: "https://github.com/mikeyscott/ghs-specimen-viewer"
+license: "MIT"
+abstract: "Browser-based viewer for geologic specimen outlines and associated density data used for publication-linked inspection and rendering."
+keywords:
+  - geology
+  - morphometrics
+  - specimen outlines
+  - visualization
+  - heatmap
+preferred-citation:
+  type: software
+  title: "ghs-specimen-viewer"
+  authors:
+    - family-names: "Scott"
+      given-names: "Michael W."
+    - family-names: "Scott"
+      given-names: "George H."
+  repository-code: "https://github.com/mikeyscott/ghs-specimen-viewer"
+  url: "https://github.com/mikeyscott/ghs-specimen-viewer"
+  license: "MIT"
